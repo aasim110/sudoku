@@ -47,8 +47,8 @@ final class DailyChallengeController extends AsyncNotifier<DailyChallenge?> {
 
     final now = DateTime.now().toUtc();
     final difficulty = _difficultyForDate(normalizedDate);
-    final puzzle = ref
-        .read(sudokuPuzzleGeneratorProvider)
+    final puzzle = await ref
+        .read(asyncSudokuPuzzleGeneratorProvider)
         .generate(
           difficulty: difficulty,
           seed: 'daily-${normalizedDate.toIso8601String()}',

@@ -1,17 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:offline_sudoku/app/router/app_routes.dart';
 import 'package:offline_sudoku/core/constants/app_dimensions.dart';
+import 'package:offline_sudoku/features/gameplay/application/providers/game_controller.dart';
 import 'package:offline_sudoku/shared/animations/pressable_scale.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
+    final hasActiveSession = ref.watch(
+      gameSessionProvider.select((session) => session?.isActive ?? false),
+    );
 
     return Scaffold(
       backgroundColor: colorScheme.surface,
@@ -20,7 +25,7 @@ class HomeScreen extends StatelessWidget {
         actions: [
           IconButton(
             tooltip: 'Settings',
-            onPressed: () => context.go(AppRoutes.settings),
+            onPressed: () => context.push(AppRoutes.settings),
             icon: const Icon(Icons.settings_outlined),
           ),
         ],
@@ -53,14 +58,26 @@ class HomeScreen extends StatelessWidget {
                               .fadeIn(duration: 260.ms)
                               .slideY(begin: .08, end: 0),
                           const SizedBox(height: AppDimensions.spacingLg),
+                          if (hasActiveSession) ...[
+                            _PrimaryAction(
+                                  title: 'Resume Game',
+                                  subtitle: 'Continue your saved puzzle',
+                                  icon: Icons.play_circle_outline_rounded,
+                                  onTap: () => context.push(AppRoutes.game),
+                                )
+                                .animate(delay: 70.ms)
+                                .fadeIn(duration: 260.ms)
+                                .slideY(begin: .08, end: 0),
+                            const SizedBox(height: AppDimensions.spacingMd),
+                          ],
                           _PrimaryAction(
                                 title: 'New Game',
                                 subtitle: 'Start a fresh puzzle',
                                 icon: Icons.grid_4x4_rounded,
                                 onTap: () =>
-                                    context.go(AppRoutes.difficultySelection),
+                                    _handleNewGame(context, hasActiveSession),
                               )
-                              .animate(delay: 70.ms)
+                              .animate(delay: hasActiveSession ? 110.ms : 70.ms)
                               .fadeIn(duration: 260.ms)
                               .slideY(begin: .08, end: 0),
                           const SizedBox(height: AppDimensions.spacingLg),
@@ -77,7 +94,53 @@ class HomeScreen extends StatelessWidget {
       ),
     );
   }
+
+  Future<void> _handleNewGame(
+    BuildContext context,
+    bool hasActiveSession,
+  ) async {
+    if (!hasActiveSession) {
+      await context.push<void>(AppRoutes.difficultySelection);
+      return;
+    }
+
+    final action = await showDialog<_NewGameAction>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Resume previous game?'),
+          content: const Text(
+            'You have an unfinished puzzle ready to continue.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () =>
+                  Navigator.of(context).pop(_NewGameAction.newGame),
+              child: const Text('New Game'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(_NewGameAction.resume),
+              child: const Text('Resume'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (!context.mounted || action == null) {
+      return;
+    }
+
+    switch (action) {
+      case _NewGameAction.resume:
+        await context.push<void>(AppRoutes.game);
+      case _NewGameAction.newGame:
+        await context.push<void>(AppRoutes.difficultySelection);
+    }
+  }
 }
+
+enum _NewGameAction { resume, newGame }
 
 class _HomeHeader extends StatelessWidget {
   const _HomeHeader({required this.isWide});
@@ -294,7 +357,7 @@ class _HomeActionTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(AppDimensions.radiusMd),
         child: InkWell(
           borderRadius: BorderRadius.circular(AppDimensions.radiusMd),
-          onTap: () => context.go(action.route),
+          onTap: () => context.push(action.route),
           child: DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(AppDimensions.radiusMd),

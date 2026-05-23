@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:offline_sudoku/core/persistence/persistence_providers.dart';
+import 'package:offline_sudoku/features/achievements/application/providers/achievements_controller.dart';
 import 'package:offline_sudoku/features/gameplay/application/providers/timer_controller.dart';
 import 'package:offline_sudoku/features/gameplay/domain/entities/game_session.dart';
+import 'package:offline_sudoku/features/stats/application/providers/stats_controller.dart';
 import 'package:offline_sudoku/features/sudoku_engine/application/providers/sudoku_engine_providers.dart';
 import 'package:offline_sudoku/features/sudoku_engine/domain/entities/hint_result.dart';
 import 'package:offline_sudoku/features/sudoku_engine/domain/entities/sudoku_cell.dart';
@@ -127,17 +129,41 @@ final selectedPeerIndexesProvider = Provider<Set<int>>((ref) {
 
 final class GameController extends AsyncNotifier<GameSession?> {
   static const _uuid = Uuid();
+  static const _timerCheckpointInterval = Duration(seconds: 10);
+  static const _cacheTargetPerDifficulty = 2;
+
+  Future<void> _lastSave = Future<void>.value();
+  Duration _lastCheckpointElapsed = Duration.zero;
+  bool _resumeTimerAfterLifecyclePause = false;
 
   @override
   Future<GameSession?> build() async {
+    ref.listen<Duration>(gameTimerElapsedProvider, (previous, next) {
+      final session = state.asData?.value;
+      if (session == null || !session.isActive) {
+        return;
+      }
+      if (next.inSeconds == previous?.inSeconds) {
+        return;
+      }
+      if (next - _lastCheckpointElapsed < _timerCheckpointInterval) {
+        return;
+      }
+
+      _lastCheckpointElapsed = next;
+      _setSession(session.copyWith(elapsedTime: next));
+    });
+
     final session = await ref
         .read(gameSessionRepositoryProvider)
         .getCurrentSession();
     if (session != null) {
+      _lastCheckpointElapsed = session.elapsedTime;
       ref
           .read(gameTimerControllerProvider.notifier)
           .setElapsed(session.elapsedTime);
     }
+    unawaited(_preGeneratePuzzles());
     return session;
   }
 
@@ -146,9 +172,9 @@ final class GameController extends AsyncNotifier<GameSession?> {
     String? seed,
     bool isDailyChallenge = false,
   }) async {
-    final generator = ref.read(sudokuPuzzleGeneratorProvider);
+    state = const AsyncLoading<GameSession?>();
     final now = DateTime.now().toUtc();
-    final puzzle = generator.generate(
+    final puzzle = await _puzzleForNewGame(
       difficulty: difficulty,
       seed: seed,
       createdAt: now,
@@ -166,8 +192,86 @@ final class GameController extends AsyncNotifier<GameSession?> {
 
     state = AsyncData(session);
     ref.read(gameTimerControllerProvider.notifier).start();
-    unawaited(ref.read(sudokuPuzzleRepositoryProvider).savePuzzle(puzzle));
-    unawaited(ref.read(gameSessionRepositoryProvider).saveSession(session));
+    await Future.wait([
+      ref.read(sudokuPuzzleRepositoryProvider).savePuzzle(puzzle),
+      _saveSession(session),
+      _recordGameStarted(difficulty),
+    ]);
+    unawaited(_ensureCachedPuzzles(difficulty));
+  }
+
+  Future<SudokuPuzzle> _puzzleForNewGame({
+    required SudokuDifficulty difficulty,
+    required String? seed,
+    required DateTime createdAt,
+  }) async {
+    if (seed != null && seed.trim().isNotEmpty) {
+      return _generatePuzzle(
+        difficulty: difficulty,
+        seed: seed,
+        createdAt: createdAt,
+      );
+    }
+
+    final cached = await ref
+        .read(sudokuPuzzleRepositoryProvider)
+        .getCachedPuzzles(difficulty: difficulty, limit: 1);
+    if (cached.isNotEmpty) {
+      final puzzle = cached.first;
+      await ref.read(sudokuPuzzleRepositoryProvider).deletePuzzle(puzzle.id);
+      return puzzle.copyWith(createdAt: createdAt);
+    }
+
+    return _generatePuzzle(
+      difficulty: difficulty,
+      seed: _uniqueSeed(difficulty),
+      createdAt: createdAt,
+    );
+  }
+
+  Future<SudokuPuzzle> _generatePuzzle({
+    required SudokuDifficulty difficulty,
+    required String seed,
+    required DateTime createdAt,
+  }) {
+    return ref
+        .read(asyncSudokuPuzzleGeneratorProvider)
+        .generate(difficulty: difficulty, seed: seed, createdAt: createdAt);
+  }
+
+  Future<void> _preGeneratePuzzles() async {
+    for (final difficulty in SudokuDifficulty.values) {
+      if (!ref.mounted) {
+        return;
+      }
+      await _ensureCachedPuzzles(difficulty);
+    }
+  }
+
+  Future<void> _ensureCachedPuzzles(SudokuDifficulty difficulty) async {
+    final repository = ref.read(sudokuPuzzleRepositoryProvider);
+    final cached = await repository.getCachedPuzzles(
+      difficulty: difficulty,
+      limit: _cacheTargetPerDifficulty,
+    );
+    var missing = _cacheTargetPerDifficulty - cached.length;
+
+    while (missing > 0 && ref.mounted) {
+      final puzzle = await _generatePuzzle(
+        difficulty: difficulty,
+        seed: _uniqueSeed(difficulty),
+        createdAt: DateTime.now().toUtc(),
+      );
+      if (!ref.mounted) {
+        return;
+      }
+      await repository.savePuzzle(puzzle);
+      missing--;
+    }
+  }
+
+  String _uniqueSeed(SudokuDifficulty difficulty) {
+    return '${difficulty.name}-${DateTime.now().microsecondsSinceEpoch}-${_uuid.v4()}';
   }
 
   void restartCurrentPuzzle() {
@@ -239,16 +343,53 @@ final class GameController extends AsyncNotifier<GameSession?> {
       (current) => current.value == current.solution,
     );
 
-    _setSession(
-      session.copyWith(
-        cells: _clearRelatedNotes(cells, index, value),
-        status: completed ? GameSessionStatus.completed : session.status,
-        completedAt: completed ? DateTime.now().toUtc() : session.completedAt,
-        mistakeCount: session.mistakeCount + (isMistake ? 1 : 0),
-        undoStack: [...session.undoStack, move],
-        redoStack: const <GameMove>[],
-      ),
+    final updated = session.copyWith(
+      cells: _clearRelatedNotes(cells, index, value),
+      status: completed ? GameSessionStatus.completed : session.status,
+      completedAt: completed ? DateTime.now().toUtc() : session.completedAt,
+      elapsedTime: ref.read(gameTimerElapsedProvider),
+      mistakeCount: session.mistakeCount + (isMistake ? 1 : 0),
+      undoStack: [...session.undoStack, move],
+      redoStack: const <GameMove>[],
     );
+
+    _setSession(updated);
+
+    if (completed && session.status != GameSessionStatus.completed) {
+      unawaited(_recordCompletion(updated));
+    }
+  }
+
+  Future<void> _recordGameStarted(SudokuDifficulty difficulty) async {
+    await ref.read(statsControllerProvider.future);
+    if (!ref.mounted) {
+      return;
+    }
+    await ref
+        .read(statsControllerProvider.notifier)
+        .recordGameStarted(difficulty);
+  }
+
+  Future<void> _recordCompletion(GameSession session) async {
+    await ref.read(statsControllerProvider.future);
+    await ref.read(achievementsControllerProvider.future);
+    if (!ref.mounted) {
+      return;
+    }
+    await ref
+        .read(statsControllerProvider.notifier)
+        .recordGameCompleted(session);
+    ref
+        .read(achievementsControllerProvider.notifier)
+        .updateProgress('first_win', 1);
+    if (session.mistakeCount == 0) {
+      ref
+          .read(achievementsControllerProvider.notifier)
+          .updateProgress('no_mistakes', 1);
+    }
+    await ref
+        .read(achievementsControllerProvider.notifier)
+        .persistCurrentAchievements();
   }
 
   void eraseSelectedCell() {
@@ -363,8 +504,12 @@ final class GameController extends AsyncNotifier<GameSession?> {
 
   void pause() {
     ref.read(gameTimerControllerProvider.notifier).pause();
+    final elapsed = ref.read(gameTimerElapsedProvider);
     _updateSession(
-      (session) => session.copyWith(status: GameSessionStatus.paused),
+      (session) => session.copyWith(
+        status: GameSessionStatus.paused,
+        elapsedTime: elapsed,
+      ),
     );
   }
 
@@ -377,6 +522,69 @@ final class GameController extends AsyncNotifier<GameSession?> {
 
   void syncElapsedTime(Duration elapsed) {
     _updateSession((session) => session.copyWith(elapsedTime: elapsed));
+  }
+
+  Future<void> persistCurrentSession() async {
+    final session = state.asData?.value;
+    if (session == null) {
+      await _lastSave;
+      return;
+    }
+
+    final elapsed = ref.read(gameTimerElapsedProvider);
+    final updated = session.copyWith(
+      elapsedTime: elapsed,
+      updatedAt: DateTime.now().toUtc(),
+    );
+    state = AsyncData(updated);
+    await _saveSession(updated);
+  }
+
+  Future<void> checkpointForLifecyclePause() async {
+    final session = state.asData?.value;
+    if (session == null) {
+      await _lastSave;
+      return;
+    }
+
+    final timerRunning = ref.read(gameTimerRunningProvider);
+    _resumeTimerAfterLifecyclePause =
+        timerRunning && session.status == GameSessionStatus.playing;
+
+    final elapsed = ref.read(gameTimerElapsedProvider);
+    final updated = session.copyWith(
+      elapsedTime: elapsed,
+      updatedAt: DateTime.now().toUtc(),
+    );
+
+    if (timerRunning) {
+      ref.read(gameTimerControllerProvider.notifier).pause();
+    }
+
+    state = AsyncData(updated);
+    await _saveSession(updated);
+  }
+
+  Future<void> restoreAfterLifecycleResume() async {
+    final restored = await ref
+        .read(gameSessionRepositoryProvider)
+        .getCurrentSession();
+    if (!ref.mounted || restored == null) {
+      return;
+    }
+
+    _lastCheckpointElapsed = restored.elapsedTime;
+    state = AsyncData(restored);
+    ref
+        .read(gameTimerControllerProvider.notifier)
+        .setElapsed(restored.elapsedTime);
+
+    if (_resumeTimerAfterLifecyclePause &&
+        restored.status == GameSessionStatus.playing) {
+      ref.read(gameTimerControllerProvider.notifier).resume();
+    }
+
+    _resumeTimerAfterLifecyclePause = false;
   }
 
   void _toggleNote(GameSession session, int index, int value) {
@@ -417,7 +625,12 @@ final class GameController extends AsyncNotifier<GameSession?> {
   void _setSession(GameSession session) {
     final updated = session.copyWith(updatedAt: DateTime.now().toUtc());
     state = AsyncData(updated);
-    unawaited(ref.read(gameSessionRepositoryProvider).saveSession(updated));
+    unawaited(_saveSession(updated));
+  }
+
+  Future<void> _saveSession(GameSession session) {
+    _lastSave = ref.read(gameSessionRepositoryProvider).saveSession(session);
+    return _lastSave;
   }
 
   List<SudokuCell> _cellsFromPuzzle(SudokuPuzzle puzzle) {

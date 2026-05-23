@@ -5,6 +5,7 @@ import 'package:offline_sudoku/features/gameplay/application/providers/game_cont
 import 'package:offline_sudoku/features/gameplay/application/providers/timer_controller.dart';
 import 'package:offline_sudoku/features/gameplay/domain/entities/game_session.dart';
 import 'package:offline_sudoku/features/sudoku_engine/application/providers/sudoku_engine_providers.dart';
+import 'package:offline_sudoku/features/sudoku_engine/application/services/async_sudoku_generator.dart';
 import 'package:offline_sudoku/features/sudoku_engine/domain/entities/sudoku_puzzle.dart';
 
 import '../../../../helpers/fakes.dart';
@@ -13,14 +14,23 @@ void main() {
   late ProviderContainer container;
   late FakeGameSessionRepository gameRepository;
   late FakeSudokuPuzzleRepository puzzleRepository;
+  late FakeUserStatsRepository statsRepository;
+  late FakeAchievementRepository achievementRepository;
+  late CountingAsyncSudokuPuzzleGenerator asyncGenerator;
 
   setUp(() {
     gameRepository = FakeGameSessionRepository();
     puzzleRepository = FakeSudokuPuzzleRepository();
+    statsRepository = FakeUserStatsRepository();
+    achievementRepository = FakeAchievementRepository();
+    asyncGenerator = CountingAsyncSudokuPuzzleGenerator();
     container = ProviderContainer(
       overrides: [
         gameSessionRepositoryProvider.overrideWithValue(gameRepository),
         sudokuPuzzleRepositoryProvider.overrideWithValue(puzzleRepository),
+        userStatsRepositoryProvider.overrideWithValue(statsRepository),
+        achievementRepositoryProvider.overrideWithValue(achievementRepository),
+        asyncSudokuPuzzleGeneratorProvider.overrideWithValue(asyncGenerator),
         sudokuPuzzleGeneratorProvider.overrideWithValue(
           FakeSudokuPuzzleGenerator(),
         ),
@@ -45,6 +55,22 @@ void main() {
     expect(session.cells.length, 81);
     expect(gameRepository.sessions, contains(session.id));
     expect(puzzleRepository.puzzles, contains(session.puzzle.id));
+  });
+
+  test('uses a cached puzzle before generating a new one', () async {
+    await container.read(gameControllerProvider.future);
+    final cached = fakePuzzle(
+      difficulty: SudokuDifficulty.expert,
+    ).copyWith(id: 'cached-expert', seed: 'cached-seed');
+    await puzzleRepository.savePuzzle(cached);
+
+    await container
+        .read(gameControllerProvider.notifier)
+        .startNewGame(difficulty: SudokuDifficulty.expert);
+
+    final session = container.read(gameControllerProvider).asData!.value!;
+    expect(session.puzzle.id, 'cached-expert');
+    expect(session.puzzle.difficulty, SudokuDifficulty.expert);
   });
 
   test('places numbers, tracks mistakes, undo, and redo', () async {
@@ -83,4 +109,52 @@ void main() {
     timer.pause();
     expect(container.read(gameTimerRunningProvider), isFalse);
   });
+
+  test(
+    'lifecycle checkpoint saves elapsed time and restore resumes timer',
+    () async {
+      await container.read(gameControllerProvider.future);
+      await container
+          .read(gameControllerProvider.notifier)
+          .startNewGame(difficulty: SudokuDifficulty.easy);
+
+      final timer = container.read(gameTimerControllerProvider.notifier);
+      timer.setElapsed(const Duration(seconds: 42));
+
+      await container
+          .read(gameControllerProvider.notifier)
+          .checkpointForLifecyclePause();
+
+      final saved = gameRepository.sessions.values.single;
+      expect(saved.elapsedTime, const Duration(seconds: 42));
+      expect(container.read(gameTimerRunningProvider), isFalse);
+
+      await container
+          .read(gameControllerProvider.notifier)
+          .restoreAfterLifecycleResume();
+
+      expect(
+        container.read(gameTimerElapsedProvider),
+        const Duration(seconds: 42),
+      );
+      expect(container.read(gameTimerRunningProvider), isTrue);
+    },
+  );
+}
+
+final class CountingAsyncSudokuPuzzleGenerator
+    implements AsyncSudokuPuzzleGenerator {
+  final calls = <SudokuDifficulty>[];
+
+  @override
+  Future<SudokuPuzzle> generate({
+    required SudokuDifficulty difficulty,
+    String? seed,
+    DateTime? createdAt,
+  }) async {
+    calls.add(difficulty);
+    return fakePuzzle(
+      difficulty: difficulty,
+    ).copyWith(createdAt: createdAt ?? DateTime.utc(2026, 5, 22), seed: seed);
+  }
 }

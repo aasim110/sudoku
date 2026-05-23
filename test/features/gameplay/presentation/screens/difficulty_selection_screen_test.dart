@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:offline_sudoku/core/persistence/persistence_providers.dart';
 import 'package:offline_sudoku/features/gameplay/presentation/screens/difficulty_selection_screen.dart';
+import 'package:offline_sudoku/features/sudoku_engine/application/providers/sudoku_engine_providers.dart';
+
+import '../../../../helpers/fakes.dart';
 
 void main() {
   testWidgets('renders difficulty cards and updates selected action', (
@@ -10,7 +15,17 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(
-      const MaterialApp(home: DifficultySelectionScreen()),
+      ProviderScope(
+        overrides: [
+          sudokuPuzzleRepositoryProvider.overrideWithValue(
+            FakeSudokuPuzzleRepository(),
+          ),
+          asyncSudokuPuzzleGeneratorProvider.overrideWithValue(
+            FakeAsyncSudokuPuzzleGenerator(),
+          ),
+        ],
+        child: const MaterialApp(home: DifficultySelectionScreen()),
+      ),
     );
     await tester.pumpAndSettle();
 
@@ -26,5 +41,10 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Start Hard'), findsOneWidget);
+
+    await tester.tap(find.text('Expert'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Start Expert'), findsOneWidget);
   });
 }

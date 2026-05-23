@@ -1,26 +1,30 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:offline_sudoku/app/router/app_routes.dart';
 import 'package:offline_sudoku/core/constants/app_dimensions.dart';
+import 'package:offline_sudoku/features/sudoku_engine/application/providers/puzzle_controller.dart';
 import 'package:offline_sudoku/features/sudoku_engine/domain/entities/sudoku_puzzle.dart';
 import 'package:offline_sudoku/shared/animations/pressable_scale.dart';
 
-class DifficultySelectionScreen extends StatefulWidget {
+class DifficultySelectionScreen extends ConsumerStatefulWidget {
   const DifficultySelectionScreen({super.key});
 
   @override
-  State<DifficultySelectionScreen> createState() =>
+  ConsumerState<DifficultySelectionScreen> createState() =>
       _DifficultySelectionScreenState();
 }
 
-class _DifficultySelectionScreenState extends State<DifficultySelectionScreen> {
-  SudokuDifficulty _selectedDifficulty = SudokuDifficulty.easy;
+class _DifficultySelectionScreenState
+    extends ConsumerState<DifficultySelectionScreen> {
+  bool _isStarting = false;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
+    final selectedDifficulty = ref.watch(selectedDifficultyProvider);
 
     return Scaffold(
       appBar: AppBar(title: const Text('New Game')),
@@ -47,7 +51,7 @@ class _DifficultySelectionScreenState extends State<DifficultySelectionScreen> {
                       sliver: SliverList(
                         delegate: SliverChildListDelegate.fixed([
                           _DifficultyHeader(
-                                selectedDifficulty: _selectedDifficulty,
+                                selectedDifficulty: selectedDifficulty,
                               )
                               .animate()
                               .fadeIn(duration: 240.ms)
@@ -55,19 +59,38 @@ class _DifficultySelectionScreenState extends State<DifficultySelectionScreen> {
                           const SizedBox(height: AppDimensions.spacingLg),
                           _DifficultyCards(
                             isWide: isWide,
-                            selectedDifficulty: _selectedDifficulty,
-                            onSelected: (difficulty) {
-                              setState(() {
-                                _selectedDifficulty = difficulty;
-                              });
-                            },
+                            selectedDifficulty: selectedDifficulty,
+                            onSelected: _isStarting
+                                ? null
+                                : (difficulty) {
+                                    ref
+                                        .read(puzzleControllerProvider.notifier)
+                                        .selectDifficulty(difficulty);
+                                  },
                           ),
                           const SizedBox(height: AppDimensions.spacingLg),
-                          FilledButton.icon(
-                                onPressed: () => _startGame(context),
-                                icon: const Icon(Icons.play_arrow_rounded),
-                                label: Text(
-                                  'Start ${_selectedDifficulty.label}',
+                          AnimatedSwitcher(
+                                duration: 180.ms,
+                                switchInCurve: Curves.easeOutCubic,
+                                switchOutCurve: Curves.easeInCubic,
+                                child: FilledButton.icon(
+                                  key: ValueKey(_isStarting),
+                                  onPressed: _isStarting
+                                      ? null
+                                      : () => _startGame(selectedDifficulty),
+                                  icon: _isStarting
+                                      ? const SizedBox.square(
+                                          dimension: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Icon(Icons.play_arrow_rounded),
+                                  label: Text(
+                                    _isStarting
+                                        ? 'Preparing ${selectedDifficulty.label}'
+                                        : 'Start ${selectedDifficulty.label}',
+                                  ),
                                 ),
                               )
                               .animate(delay: 180.ms)
@@ -87,8 +110,23 @@ class _DifficultySelectionScreenState extends State<DifficultySelectionScreen> {
     );
   }
 
-  void _startGame(BuildContext context) {
-    context.go('${AppRoutes.game}?difficulty=${_selectedDifficulty.name}');
+  Future<void> _startGame(SudokuDifficulty difficulty) async {
+    setState(() {
+      _isStarting = true;
+    });
+
+    final location = Uri(
+      path: AppRoutes.game,
+      queryParameters: {'difficulty': difficulty.name},
+    ).toString();
+    await context.push<void>(location);
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _isStarting = false;
+    });
   }
 }
 
@@ -162,7 +200,7 @@ class _DifficultyCards extends StatelessWidget {
 
   final bool isWide;
   final SudokuDifficulty selectedDifficulty;
-  final ValueChanged<SudokuDifficulty> onSelected;
+  final ValueChanged<SudokuDifficulty>? onSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -171,7 +209,7 @@ class _DifficultyCards extends StatelessWidget {
         _DifficultyCard(
           difficulty: difficulty,
           selected: selectedDifficulty == difficulty,
-          onTap: () => onSelected(difficulty),
+          onTap: onSelected == null ? null : () => onSelected!(difficulty),
         ),
     ];
 
@@ -216,7 +254,7 @@ class _DifficultyCard extends StatelessWidget {
 
   final SudokuDifficulty difficulty;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -225,6 +263,7 @@ class _DifficultyCard extends StatelessWidget {
     final details = difficulty.details;
 
     return PressableScale(
+      enabled: onTap != null,
       child: Material(
         color: selected
             ? colorScheme.primaryContainer

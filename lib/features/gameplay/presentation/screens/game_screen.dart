@@ -32,6 +32,7 @@ class _GameScreenState extends ConsumerState<GameScreen> {
   int _invalidPulse = 0;
   int? _validCellIndex;
   int _validPulse = 0;
+  bool _isSavingExit = false;
 
   @override
   void initState() {
@@ -59,43 +60,56 @@ class _GameScreenState extends ConsumerState<GameScreen> {
 
     final gameState = ref.watch(gameControllerProvider);
     final session = gameState.asData?.value;
+    final isBusy = gameState.isLoading || _isSavingExit;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(session?.puzzle.difficulty.label ?? 'Sudoku'),
-        leading: IconButton(
-          tooltip: 'Pause',
-          onPressed: session == null ? null : _showPauseDialog,
-          icon: const Icon(Icons.pause_rounded),
+    final shouldGuardExit = session?.isActive ?? false;
+
+    return PopScope<void>(
+      canPop: !shouldGuardExit,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop || !shouldGuardExit) {
+          return;
+        }
+        unawaited(_confirmExitActiveGame());
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(session?.puzzle.difficulty.label ?? 'Sudoku'),
+          leading: IconButton(
+            tooltip: 'Pause',
+            onPressed: session == null || isBusy ? null : _showPauseDialog,
+            icon: const Icon(Icons.pause_rounded),
+          ),
+          actions: [
+            IconButton(
+              tooltip: 'Restart',
+              onPressed: session == null || isBusy ? null : _confirmRestart,
+              icon: const Icon(Icons.restart_alt_rounded),
+            ),
+          ],
         ),
-        actions: [
-          IconButton(
-            tooltip: 'Restart',
-            onPressed: session == null ? null : _confirmRestart,
-            icon: const Icon(Icons.restart_alt_rounded),
+        body: SafeArea(
+          child: gameState.when(
+            data: (session) {
+              if (session == null) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              return _GameContent(
+                invalidCellIndex: _invalidCellIndex,
+                invalidPulse: _invalidPulse,
+                validCellIndex: _validCellIndex,
+                validPulse: _validPulse,
+                onNumberPressed: _handleNumberPressed,
+                onErasePressed: _handleErasePressed,
+                onHintPressed: _handleHintPressed,
+              );
+            },
+            error: (error, stackTrace) => _GameError(
+              message: error.toString(),
+              onRetry: _ensureGameStarted,
+            ),
+            loading: () => const _GeneratingPuzzleView(),
           ),
-        ],
-      ),
-      body: SafeArea(
-        child: gameState.when(
-          data: (session) {
-            if (session == null) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            return _GameContent(
-              invalidCellIndex: _invalidCellIndex,
-              invalidPulse: _invalidPulse,
-              validCellIndex: _validCellIndex,
-              validPulse: _validPulse,
-              onNumberPressed: _handleNumberPressed,
-              onHintPressed: _handleHintPressed,
-            );
-          },
-          error: (error, stackTrace) => _GameError(
-            message: error.toString(),
-            onRetry: _ensureGameStarted,
-          ),
-          loading: () => const Center(child: CircularProgressIndicator()),
         ),
       ),
     );
@@ -126,16 +140,23 @@ class _GameScreenState extends ConsumerState<GameScreen> {
       return SudokuDifficulty.easy;
     }
 
-    return SudokuDifficulty.values.firstWhere(
-      (difficulty) => difficulty.name == name,
-      orElse: () => SudokuDifficulty.easy,
-    );
+    final normalized = name.trim().toLowerCase();
+    try {
+      return SudokuDifficulty.values.byName(normalized);
+    } on ArgumentError catch (error) {
+      throw StateError('Unknown Sudoku difficulty "$name": $error');
+    }
   }
 
   void _handleNumberPressed(int value) {
     final selectedCell = ref.read(selectedCellProvider);
     if (selectedCell == null || !selectedCell.canEdit) {
       unawaited(ref.read(audioServiceProvider).tap());
+      _showFeedback(
+        selectedCell == null
+            ? 'Select an empty cell first.'
+            : 'This clue cannot be changed.',
+      );
       return;
     }
 
@@ -145,6 +166,7 @@ class _GameScreenState extends ConsumerState<GameScreen> {
 
     if (isInvalid) {
       unawaited(ref.read(audioServiceProvider).invalidMove());
+      _showFeedback('That number conflicts with the solution.');
       setState(() {
         _invalidCellIndex = selectedCell.index;
         _invalidPulse++;
@@ -166,6 +188,25 @@ class _GameScreenState extends ConsumerState<GameScreen> {
     });
   }
 
+  void _handleErasePressed() {
+    final selectedCell = ref.read(selectedCellProvider);
+    if (selectedCell == null) {
+      _showFeedback('Select a cell to erase.');
+      return;
+    }
+    if (!selectedCell.canEdit) {
+      _showFeedback('Clues cannot be erased.');
+      return;
+    }
+    if (selectedCell.value == null) {
+      _showFeedback('That cell is already empty.');
+      return;
+    }
+
+    ref.read(gameControllerProvider.notifier).eraseSelectedCell();
+    unawaited(ref.read(audioServiceProvider).tap());
+  }
+
   void _handleHintPressed() {
     final cells = ref.read(gameCellsProvider);
     if (cells.isEmpty) {
@@ -175,19 +216,18 @@ class _GameScreenState extends ConsumerState<GameScreen> {
     final board = cells.map<int?>((cell) => cell.value).toList(growable: false);
     final hint = ref.read(sudokuHintEngineProvider).nextHint(board);
     if (hint == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No hint available for this board.')),
-      );
+      _showFeedback('No hint available for this board.');
       return;
     }
 
     ref.read(gameControllerProvider.notifier).applyHint(hint);
+    _showFeedback(hint.title);
   }
 
   Future<void> _showPauseDialog() async {
     ref.read(gameControllerProvider.notifier).pause();
 
-    final resume = await _showAnimatedGameDialog<bool>(
+    final action = await _showAnimatedGameDialog<_PauseAction>(
       context: context,
       barrierDismissible: false,
       child: AlertDialog(
@@ -195,22 +235,74 @@ class _GameScreenState extends ConsumerState<GameScreen> {
         content: const Text('Take your time. The timer is stopped.'),
         actions: [
           TextButton(
-            onPressed: () {
-              context.go(AppRoutes.home);
-            },
-            child: const Text('Home'),
+            onPressed: () => Navigator.of(context).pop(_PauseAction.saveExit),
+            child: const Text('Save & Exit'),
           ),
           FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
+            onPressed: () => Navigator.of(context).pop(_PauseAction.resume),
             child: const Text('Resume'),
           ),
         ],
       ),
     );
 
-    if (mounted && resume == true) {
-      ref.read(gameControllerProvider.notifier).resume();
+    if (!mounted) {
+      return;
     }
+
+    switch (action) {
+      case _PauseAction.saveExit:
+        unawaited(_saveAndExit(preferHome: true));
+      case _PauseAction.resume || null:
+        ref.read(gameControllerProvider.notifier).resume();
+    }
+  }
+
+  Future<void> _confirmExitActiveGame() async {
+    final exit = await _showAnimatedGameDialog<bool>(
+      context: context,
+      child: AlertDialog(
+        title: const Text('Save and exit?'),
+        content: const Text('Your puzzle will be paused and ready to resume.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Keep Playing'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Save & Exit'),
+          ),
+        ],
+      ),
+    );
+
+    if (mounted && exit == true) {
+      await _saveAndExit();
+    }
+  }
+
+  Future<void> _saveAndExit({bool preferHome = false}) async {
+    if (_isSavingExit) {
+      return;
+    }
+    setState(() {
+      _isSavingExit = true;
+    });
+
+    ref.read(gameControllerProvider.notifier).pause();
+    await ref.read(gameControllerProvider.notifier).persistCurrentSession();
+
+    if (!mounted) {
+      return;
+    }
+
+    if (preferHome || !context.canPop()) {
+      context.go(AppRoutes.home);
+      return;
+    }
+
+    context.pop();
   }
 
   Future<void> _confirmRestart() async {
@@ -234,7 +326,24 @@ class _GameScreenState extends ConsumerState<GameScreen> {
 
     if (restart == true) {
       ref.read(gameControllerProvider.notifier).restartCurrentPuzzle();
+      _showFeedback('Puzzle restarted.');
     }
+  }
+
+  void _showFeedback(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+          duration: 1800.ms,
+        ),
+      );
   }
 
   Future<void> _showVictoryDialog() async {
@@ -254,6 +363,8 @@ class _GameScreenState extends ConsumerState<GameScreen> {
     );
   }
 }
+
+enum _PauseAction { resume, saveExit }
 
 Future<T?> _showAnimatedGameDialog<T>({
   required BuildContext context,
@@ -289,6 +400,53 @@ Future<T?> _showAnimatedGameDialog<T>({
   );
 }
 
+class _GeneratingPuzzleView extends StatelessWidget {
+  const _GeneratingPuzzleView();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(AppDimensions.spacingXl),
+        child:
+            Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: AppDimensions.spacingMd),
+                    Text(
+                      'Preparing puzzle',
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                        color: colorScheme.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: AppDimensions.spacing2xs),
+                    Text(
+                      'Checking for a unique solution.',
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                )
+                .animate()
+                .fadeIn(duration: 220.ms)
+                .scale(
+                  begin: const Offset(.98, .98),
+                  end: const Offset(1, 1),
+                  duration: 260.ms,
+                  curve: Curves.easeOutCubic,
+                ),
+      ),
+    );
+  }
+}
+
 class _GameContent extends ConsumerWidget {
   const _GameContent({
     required this.invalidCellIndex,
@@ -296,6 +454,7 @@ class _GameContent extends ConsumerWidget {
     required this.validCellIndex,
     required this.validPulse,
     required this.onNumberPressed,
+    required this.onErasePressed,
     required this.onHintPressed,
   });
 
@@ -304,6 +463,7 @@ class _GameContent extends ConsumerWidget {
   final int? validCellIndex;
   final int validPulse;
   final ValueChanged<int> onNumberPressed;
+  final VoidCallback onErasePressed;
   final VoidCallback onHintPressed;
 
   @override
@@ -335,6 +495,7 @@ class _GameContent extends ConsumerWidget {
                   child: _GameControls(
                     showStatus: true,
                     onNumberPressed: onNumberPressed,
+                    onErasePressed: onErasePressed,
                     onHintPressed: onHintPressed,
                   ),
                 ),
@@ -370,6 +531,7 @@ class _GameContent extends ConsumerWidget {
           _GameControls(
             showStatus: false,
             onNumberPressed: onNumberPressed,
+            onErasePressed: onErasePressed,
             onHintPressed: onHintPressed,
           ),
         ],
@@ -692,11 +854,13 @@ class _GameControls extends ConsumerWidget {
   const _GameControls({
     required this.showStatus,
     required this.onNumberPressed,
+    required this.onErasePressed,
     required this.onHintPressed,
   });
 
   final bool showStatus;
   final ValueChanged<int> onNumberPressed;
+  final VoidCallback onErasePressed;
   final VoidCallback onHintPressed;
 
   @override
@@ -736,9 +900,7 @@ class _GameControls extends ConsumerWidget {
               child: _ToolButton(
                 label: 'Erase',
                 icon: Icons.backspace_outlined,
-                onPressed: () => ref
-                    .read(gameControllerProvider.notifier)
-                    .eraseSelectedCell(),
+                onPressed: onErasePressed,
               ),
             ),
             const SizedBox(width: AppDimensions.spacingXs),

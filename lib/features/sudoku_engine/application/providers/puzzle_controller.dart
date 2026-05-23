@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:offline_sudoku/core/persistence/persistence_providers.dart';
 import 'package:offline_sudoku/features/sudoku_engine/application/providers/sudoku_engine_providers.dart';
@@ -61,6 +63,8 @@ final selectedDifficultyProvider = Provider<SudokuDifficulty>((ref) {
 });
 
 final class PuzzleController extends AsyncNotifier<PuzzleState> {
+  int _difficultyRequestId = 0;
+
   @override
   Future<PuzzleState> build() async {
     final cached = await ref
@@ -77,8 +81,8 @@ final class PuzzleController extends AsyncNotifier<PuzzleState> {
     required SudokuDifficulty difficulty,
     String? seed,
   }) async {
-    final puzzle = ref
-        .read(sudokuPuzzleGeneratorProvider)
+    final puzzle = await ref
+        .read(asyncSudokuPuzzleGeneratorProvider)
         .generate(
           difficulty: difficulty,
           seed: seed,
@@ -98,9 +102,28 @@ final class PuzzleController extends AsyncNotifier<PuzzleState> {
   }
 
   Future<void> setDifficulty(SudokuDifficulty difficulty) async {
+    final requestId = ++_difficultyRequestId;
+    await _loadDifficulty(difficulty, requestId: requestId);
+  }
+
+  void selectDifficulty(SudokuDifficulty difficulty) {
+    final requestId = ++_difficultyRequestId;
+    final previous = state.asData?.value ?? const PuzzleState.initial();
+    state = AsyncData(previous.copyWith(selectedDifficulty: difficulty));
+    unawaited(_loadDifficulty(difficulty, requestId: requestId));
+  }
+
+  Future<void> _loadDifficulty(
+    SudokuDifficulty difficulty, {
+    required int requestId,
+  }) async {
     final cached = await ref
         .read(sudokuPuzzleRepositoryProvider)
         .getCachedPuzzles(difficulty: difficulty);
+    if (!ref.mounted || requestId != _difficultyRequestId) {
+      return;
+    }
+
     state = AsyncData(
       PuzzleState(
         selectedDifficulty: difficulty,

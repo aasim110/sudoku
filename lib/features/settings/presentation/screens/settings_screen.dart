@@ -16,7 +16,7 @@ class SettingsScreen extends StatelessWidget {
         message:
             'Sound, haptics, mistake behavior, and accessibility live here.',
         action: OutlinedButton(
-          onPressed: () => context.go(AppRoutes.themes),
+          onPressed: () => context.push(AppRoutes.themes),
           child: const Text('Themes'),
         ),
       ),

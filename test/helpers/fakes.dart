@@ -8,6 +8,7 @@ import 'package:offline_sudoku/features/settings/domain/entities/app_settings.da
 import 'package:offline_sudoku/features/settings/domain/repositories/app_settings_repository.dart';
 import 'package:offline_sudoku/features/stats/domain/entities/user_stats.dart';
 import 'package:offline_sudoku/features/stats/domain/repositories/user_stats_repository.dart';
+import 'package:offline_sudoku/features/sudoku_engine/application/services/async_sudoku_generator.dart';
 import 'package:offline_sudoku/features/sudoku_engine/domain/entities/sudoku_puzzle.dart';
 import 'package:offline_sudoku/features/sudoku_engine/domain/repositories/sudoku_puzzle_repository.dart';
 import 'package:offline_sudoku/features/sudoku_engine/domain/services/sudoku_generator.dart';
@@ -125,6 +126,20 @@ final class FakeSudokuPuzzleGenerator implements SudokuPuzzleGenerator {
 
   @override
   List<int> generateSolvedBoard({String? seed}) => solvedGrid;
+}
+
+final class FakeAsyncSudokuPuzzleGenerator
+    implements AsyncSudokuPuzzleGenerator {
+  @override
+  Future<SudokuPuzzle> generate({
+    required SudokuDifficulty difficulty,
+    String? seed,
+    DateTime? createdAt,
+  }) async {
+    return fakePuzzle(
+      difficulty: difficulty,
+    ).copyWith(createdAt: createdAt ?? DateTime.utc(2026, 5, 22), seed: seed);
+  }
 }
 
 final class FakeSudokuPuzzleRepository implements SudokuPuzzleRepository {

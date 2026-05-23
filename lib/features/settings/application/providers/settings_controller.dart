@@ -61,7 +61,7 @@ final class SettingsController extends AsyncNotifier<AppSettings> {
       createdAt: now,
       updatedAt: now,
     );
-    unawaited(ref.read(appSettingsRepositoryProvider).saveSettings(settings));
+    await ref.read(appSettingsRepositoryProvider).saveSettings(settings);
     return settings;
   }
 

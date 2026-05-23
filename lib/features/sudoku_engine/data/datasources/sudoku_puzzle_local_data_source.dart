@@ -40,18 +40,15 @@ final class IsarSudokuPuzzleLocalDataSource
     SudokuDifficulty? difficulty,
     int limit = 50,
   }) async {
-    final records = await _collection.where().findAll();
-    final filtered =
-        records
-            .where(
-              (record) =>
-                  difficulty == null ||
-                  record.difficultyName == difficulty.name,
-            )
-            .toList()
-          ..sort((left, right) => right.createdAt.compareTo(left.createdAt));
+    final records = difficulty == null
+        ? await _collection.where().findAll()
+        : await _collection
+              .filter()
+              .difficultyNameEqualTo(difficulty.name)
+              .findAll();
 
-    return filtered.take(limit).toList(growable: false);
+    records.sort((left, right) => right.createdAt.compareTo(left.createdAt));
+    return records.take(limit).toList(growable: false);
   }
 
   @override

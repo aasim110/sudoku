@@ -13,6 +13,9 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         dailyChallengeRepositoryProvider.overrideWithValue(repository),
+        asyncSudokuPuzzleGeneratorProvider.overrideWithValue(
+          FakeAsyncSudokuPuzzleGenerator(),
+        ),
         sudokuPuzzleGeneratorProvider.overrideWithValue(
           FakeSudokuPuzzleGenerator(),
         ),

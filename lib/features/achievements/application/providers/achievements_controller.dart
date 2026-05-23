@@ -44,9 +44,7 @@ final class AchievementsController extends AsyncNotifier<List<Achievement>> {
     }
 
     final defaults = _defaultAchievements();
-    unawaited(
-      ref.read(achievementRepositoryProvider).saveAchievements(defaults),
-    );
+    await ref.read(achievementRepositoryProvider).saveAchievements(defaults);
     return defaults;
   }
 
@@ -63,6 +61,17 @@ final class AchievementsController extends AsyncNotifier<List<Achievement>> {
     unawaited(
       ref.read(achievementRepositoryProvider).saveAchievement(achievement),
     );
+  }
+
+  Future<void> persistCurrentAchievements() async {
+    final achievements = state.asData?.value;
+    if (achievements == null) {
+      return;
+    }
+
+    await ref
+        .read(achievementRepositoryProvider)
+        .saveAchievements(achievements);
   }
 
   void updateProgress(String id, int progress) {
